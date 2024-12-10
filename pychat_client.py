@@ -2,158 +2,79 @@ import socket
 import threading
 import time
 
-HOST = '127.0.0.1'  # Localhost for testing
-CHAT_PORT = 12345
 DISCOVERY_PORT = 12344
+CHAT_PORT = 12345
 
-clients = {}  # Store client socket and username
-banned_users = {}  # Store banned users and their ban expiry times
-channels = {}  # Store channels and their members
+# Attempt to discover the server on the local network
+def discover_server():
+    """Broadcast a discovery message to find the PyChat server."""
+    discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    discovery_socket.settimeout(5)  # Timeout after 5 seconds
 
-# Kick timer
-kick_timers = {}
+    try:
+        discovery_message = "PYCHAT_DISCOVERY".encode()
+        discovery_socket.sendto(discovery_message, ('255.255.255.255', DISCOVERY_PORT))
+        print("Searching for PyChat server...")
 
-def handle_client(client, addr):
-    """Handles an individual client."""
-    # Ask for a username
-    client.send("Enter a username: ".encode())
-    username = client.recv(1024).decode()
-    clients[client] = username
-    print(f"{username} has joined the server from {addr}")
-    
-    # Send welcome message
-    client.send(f"Welcome {username}! Type /help for commands.\n".encode())
-    
+        # Wait for a response from the server
+        while True:
+            try:
+                response, server_address = discovery_socket.recvfrom(1024)
+                if response.decode() == "PYCHAT_SERVER":
+                    print(f"Found server at {server_address[0]}")
+                    return server_address[0]
+            except socket.timeout:
+                break
+    except Exception as e:
+        print(f"Discovery error: {e}")
+    finally:
+        discovery_socket.close()
+
+    return None
+
+# Listen for incoming messages
+def receive_messages(client_socket):
+    """Receive and display messages from the server."""
     while True:
         try:
-            message = client.recv(1024).decode()
+            message = client_socket.recv(1024).decode()
             if message:
-                process_message(message, client, username)
+                print(message)
             else:
                 break
         except:
+            print("Connection to the server has been lost.")
             break
 
-    remove_client(client, username)
+# Main client function
+def start_client():
+    """Start the PyChat client and connect to the server."""
+    server_ip = discover_server()
+    if not server_ip:
+        print("Server discovery timed out.\nCould not find a PyChat server.")
+        return
 
-def process_message(message, client, username):
-    """Processes incoming messages and handles commands."""
-    if message.startswith("/"):
-        # Command handling
-        command_parts = message.split()
-        command = command_parts[0].lower()
-        
-        if command == "/kick" and len(command_parts) == 2:
-            kick_user(command_parts[1], username)
-        elif command == "/ban" and len(command_parts) == 3:
-            ban_user(command_parts[1], int(command_parts[2]), username)
-        elif command == "/cc" and len(command_parts) == 2:
-            create_channel(command_parts[1], client)
-        elif command == "/channels":
-            list_channels(client)
-        elif command == "/joinc" and len(command_parts) == 2:
-            join_channel(command_parts[1], client)
-        elif command == "/help":
-            show_help(client)
-        else:
-            client.send("Invalid command. Type /help for a list of commands.\n".encode())
-    else:
-        # Regular message handling (broadcast)
-        broadcast(message, client, username)
+    try:
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((server_ip, CHAT_PORT))
+        print("Connected to the PyChat server!")
 
-def broadcast(message, sender_client, sender_username):
-    """Broadcast a message to all clients."""
-    for client, username in clients.items():
-        if client != sender_client:
-            client.send(f"{sender_username}: {message}\n".encode())
+        # Start a thread to listen for incoming messages
+        threading.Thread(target=receive_messages, args=(client_socket,), daemon=True).start()
 
-def kick_user(username, admin_username):
-    """Kick a user for 1 minute."""
-    for client, user in clients.items():
-        if user == username:
-            kick_timers[client] = time.time() + 60  # 60 seconds ban
-            client.send(f"You have been kicked for 1 minute by {admin_username}\n".encode())
-            break
+        # Send messages to the server
+        while True:
+            message = input("> ")
+            if message.lower() == "/quit":
+                print("Exiting PyChat...")
+                client_socket.close()
+                break
+            else:
+                client_socket.send(message.encode())
 
-def ban_user(username, days, admin_username):
-    """Ban a user for a specified number of days."""
-    for client, user in clients.items():
-        if user == username:
-            banned_users[user] = time.time() + (days * 86400)  # Ban duration in seconds
-            client.send(f"You have been banned for {days} days by {admin_username}\n".encode())
-            break
-
-def create_channel(channel_name, client):
-    """Create a new channel."""
-    if channel_name not in channels:
-        channels[channel_name] = [client]  # Add the creator to the channel
-        client.send(f"Channel '{channel_name}' created and you joined it.\n".encode())
-    else:
-        client.send(f"Channel '{channel_name}' already exists.\n".encode())
-
-def list_channels(client):
-    """List all channels."""
-    if channels:
-        channel_list = "\n".join([channel for channel in channels])
-        client.send(f"Channels available:\n{channel_list}\n".encode())
-    else:
-        client.send("No channels available.\n".encode())
-
-def join_channel(channel_name, client):
-    """Join an existing channel."""
-    if channel_name in channels:
-        channels[channel_name].append(client)
-        client.send(f"You have joined the channel '{channel_name}'.\n".encode())
-    else:
-        client.send(f"Channel '{channel_name}' does not exist.\n".encode())
-
-def remove_client(client, username):
-    """Removes a client from the server."""
-    if client in clients:
-        del clients[client]
-        print(f"{username} has left the server.")
-        broadcast(f"{username} has left the chat.\n", client, username)
-
-def show_help(client):
-    """Display the help message with available commands."""
-    help_message = """
-    Available Commands:
-    /kick <username> - Kick a user for 1 minute.
-    /ban <username> <days> - Ban a user for a specified number of days.
-    /cc <channel-name> - Create a new channel.
-    /channels - List all available channels.
-    /joinc <channel-name> - Join a channel.
-    /help - Show this help message.
-    """
-    client.send(help_message.encode())
-
-def handle_kicks_and_bans():
-    """Check for kicked or banned users."""
-    while True:
-        for client in list(kick_timers.keys()):
-            if time.time() > kick_timers[client]:
-                client.send("You are no longer kicked and can join the chat.\n".encode())
-                del kick_timers[client]
-        
-        for user in list(banned_users.keys()):
-            if time.time() > banned_users[user]:
-                del banned_users[user]
-
-        time.sleep(10)
-
-def start_chat_server():
-    """Starts the main chat server."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((HOST, CHAT_PORT))
-    server.listen()
-    print(f"Chat server listening on {HOST}:{CHAT_PORT}")
-
-    # Start the kick and ban handler thread
-    threading.Thread(target=handle_kicks_and_bans, daemon=True).start()
-
-    while True:
-        client, addr = server.accept()
-        threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+    except Exception as e:
+        print(f"Error connecting to the server: {e}")
 
 if __name__ == "__main__":
-    start_chat_server()                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+    start_client()
